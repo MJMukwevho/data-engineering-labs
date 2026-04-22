@@ -1,0 +1,9 @@
+FROM archlinux
+
+# Initialize pacman and install Java
+RUN pacman-key --init && \
+    pacman-key --populate archlinux && \
+    pacman -Sy --noconfirm jdk8-openjdk
+
+ENV JAVA_HOME=/usr/lib/jvm/java-8-openjdk
+ENV PATH=$JAVA_HOME/bin:$PATH
