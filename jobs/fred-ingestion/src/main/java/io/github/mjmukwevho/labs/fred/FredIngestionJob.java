@@ -39,7 +39,9 @@ public class FredIngestionJob {
                 failed.add(seriesId);
                 break;
             } catch (Exception e) {
-                System.err.println("FAIL  " + seriesId + ": " + e.getMessage());
+                // Some network errors have no message, so fall back to the exception type
+                String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                System.err.println("FAIL  " + seriesId + ": " + reason);
                 failed.add(seriesId);
             }
         }

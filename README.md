@@ -92,7 +92,8 @@ Each local component has an AWS equivalent, so the same design can be moved to t
 ### Phase 1: Local foundation 🚧
 - [x] Base container image with Java 17 (`infrastructure/dockerfile`)
 - [x] Batch ingestion job: FRED → raw layer (`jobs/fred-ingestion`)
-- [ ] Docker Compose stack: Spark, PostgreSQL, MinIO
+- [x] Docker Compose setup for the ingestion job (`compose.yaml`)
+- [ ] Add Spark, PostgreSQL and MinIO to the Compose stack
 - [ ] Write raw data to MinIO instead of the local filesystem
 - [ ] Spark transformations: raw → silver → gold
 - [ ] Data quality checks and tests
@@ -117,29 +118,33 @@ Each local component has an AWS equivalent, so the same design can be moved to t
 ## Getting Started
 
 ### Prerequisites
-- Java 17+ and [Maven](https://maven.apache.org/)
-- [Docker](https://docs.docker.com/get-docker/) (for the base image)
+- [Docker](https://docs.docker.com/get-docker/) with Docker Compose
 - Git
 - A free [FRED API key](https://fred.stlouisfed.org/docs/api/api_key.html)
+
+Java and Maven are **not** needed on your machine: the job is built inside Docker.
 
 ### Run the FRED ingestion job
 
 ```bash
 git clone https://github.com/MJMukwevho/data-engineering-labs.git
-cd data-engineering-labs/jobs/fred-ingestion
+cd data-engineering-labs
 
-mvn package                               # builds and runs the tests
-export FRED_API_KEY=your_key_here
-java -jar target/fred-ingestion-0.1.0.jar
+cp .env.example .env        # then open .env and paste your FRED_API_KEY
+                            # also set HOST_UID / HOST_GID to the output of `id -u` / `id -g`
+
+docker compose build        # compiles the job and runs its tests
+docker compose run --rm fred-ingestion
 ```
 
-Optional settings:
+You should see one `OK` line per series, and the files appear in `./data/raw`.
+
+Optional settings in `.env`:
 
 | Variable                 | Default                              | Purpose                                  |
 |--------------------------|--------------------------------------|------------------------------------------|
 | `FRED_SERIES`            | `SP500,DJIA,NASDAQCOM,VIXCLS,DGS10`  | Comma-separated series to pull           |
 | `FRED_OBSERVATION_START` | full history                         | Only fetch observations from this date   |
-| `RAW_DATA_DIR`           | `data/raw`                           | Root of the raw layer                    |
 
 Output is partitioned so it can move to S3 unchanged:
 
@@ -150,21 +155,17 @@ data/raw/fred/series_id=SP500/ingest_date=2026-10-22/_metadata.json
 
 Re-running on the same day overwrites that day's partition, so the job is safe to retry.
 
-### Build the base image
+### Run without Docker (optional)
 
-From the repository root:
-
-```bash
-docker build -t data-eng-labs-base -f infrastructure/dockerfile infrastructure
-```
-
-### Verify
+With Java 17+ and [Maven](https://maven.apache.org/) installed:
 
 ```bash
-docker run --rm data-eng-labs-base java -version
+cd jobs/fred-ingestion
+mvn package
+FRED_API_KEY=your_key_here RAW_DATA_DIR=../../data/raw java -jar target/fred-ingestion-0.1.0.jar
 ```
 
-> More services (Spark, Postgres, MinIO) will be added through Docker Compose as Phase 1 progresses.
+> More services (Spark, Postgres, MinIO) will be added to `compose.yaml` as Phase 1 progresses.
 
 ---
 
@@ -172,10 +173,14 @@ docker run --rm data-eng-labs-base java -version
 
 ```
 data-engineering-labs/
+├── compose.yaml        # Local environment (docker compose)
+├── .env.example        # Template for your local settings and API key
+├── data/
+│   └── raw/            # Raw layer output (git-ignored)
 ├── infrastructure/
 │   └── dockerfile      # Base image: Arch Linux + OpenJDK 17
 ├── jobs/
-│   └── fred-ingestion/ # Java job: FRED API → raw layer
+│   └── fred-ingestion/ # Java job: FRED API → raw layer (own Dockerfile)
 ├── .gitignore
 └── README.md
 ```
