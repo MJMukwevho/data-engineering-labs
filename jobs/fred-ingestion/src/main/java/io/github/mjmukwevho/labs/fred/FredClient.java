@@ -26,9 +26,9 @@ public class FredClient {
     private final String apiKey;
     private final Duration initialBackoff;
 
-    public FredClient(String apiKey) {
+    public FredClient(String baseUrl, String apiKey) {
         this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(),
-                DEFAULT_BASE_URL, apiKey, Duration.ofSeconds(2));
+                baseUrl, apiKey, Duration.ofSeconds(2));
     }
 
     FredClient(HttpClient http, String baseUrl, String apiKey, Duration initialBackoff) {

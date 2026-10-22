@@ -94,7 +94,7 @@ Each local component has an AWS equivalent, so the same design can be moved to t
 - [x] Batch ingestion job: FRED → raw layer (`jobs/fred-ingestion`)
 - [x] Docker Compose setup for the ingestion job (`compose.yaml`)
 - [x] Compose stack: Spark 3.5 cluster, PostgreSQL, S3-compatible object store (RustFS)
-- [ ] Write raw data to the object store instead of the local filesystem
+- [x] Write raw data to the object store (`s3://lake/raw/`)
 - [ ] Spark transformations: raw → silver → gold
 - [ ] Data quality checks and tests
 - [ ] Orchestration with Airflow
@@ -132,7 +132,6 @@ git clone https://github.com/MJMukwevho/data-engineering-labs.git
 cd data-engineering-labs
 
 cp .env.example .env        # then open .env and paste your FRED_API_KEY
-                            # also set HOST_UID / HOST_GID to the output of `id -u` / `id -g`
 ```
 
 ### Start the local stack
@@ -168,7 +167,16 @@ Stop everything with `docker compose down`. Data is kept in Docker volumes; add 
 docker compose run --rm fred-ingestion
 ```
 
-You should see one `OK` line per series, and the files appear in `./data/raw`.
+This starts the object store if it isn't running, then writes each series to the `lake` bucket:
+
+```
+Writing raw data to s3://lake/raw
+OK    SP500 -> s3://lake/raw/fred/series_id=SP500/ingest_date=2026-10-22/observations.json
+...
+Done: 5 succeeded, 0 failed
+```
+
+Browse the files in the object store console under **lake → raw → fred**.
 
 Optional settings in `.env`:
 
@@ -177,14 +185,18 @@ Optional settings in `.env`:
 | `FRED_SERIES`            | `SP500,DJIA,NASDAQCOM,VIXCLS,DGS10`  | Comma-separated series to pull           |
 | `FRED_OBSERVATION_START` | full history                         | Only fetch observations from this date   |
 
-Output is partitioned so it can move to S3 unchanged:
+Each series lands in a Hive-style partition, the layout AWS Glue and Athena expect:
 
 ```
-data/raw/fred/series_id=SP500/ingest_date=2026-10-22/observations.json
-data/raw/fred/series_id=SP500/ingest_date=2026-10-22/_metadata.json
+s3://lake/raw/fred/series_id=SP500/ingest_date=2026-10-22/observations.json   # FRED response, unchanged
+s3://lake/raw/fred/series_id=SP500/ingest_date=2026-10-22/_metadata.json      # lineage; written last
 ```
 
 Re-running on the same day overwrites that day's partition, so the job is safe to retry.
+
+The job uses the AWS SDK with the standard AWS environment variables. Pointing it at Amazon S3 only means dropping `AWS_ENDPOINT_URL_S3` and `S3_FORCE_PATH_STYLE` and using an IAM role instead of access keys.
+
+> **Reading raw data with Spark:** use `.option("pathGlobFilter", "observations.json")` so Spark skips the `_metadata.json` files.
 
 ### Run without Docker (optional)
 
@@ -193,8 +205,10 @@ With Java 17+ and [Maven](https://maven.apache.org/) installed:
 ```bash
 cd jobs/fred-ingestion
 mvn package
-FRED_API_KEY=your_key_here RAW_DATA_DIR=../../data/raw java -jar target/fred-ingestion-0.1.0.jar
+FRED_API_KEY=your_key_here RAW_DATA_LOCATION=../../data/raw java -jar target/fred-ingestion-0.1.0.jar
 ```
+
+`RAW_DATA_LOCATION` accepts a local folder (as above) or an `s3://bucket/prefix` location.
 
 ---
 
@@ -205,7 +219,7 @@ data-engineering-labs/
 ├── compose.yaml        # Local environment (docker compose)
 ├── .env.example        # Template for your local settings and API key
 ├── data/
-│   └── raw/            # Raw layer output (git-ignored)
+│   └── raw/            # Raw layer when running without Docker (git-ignored)
 ├── infrastructure/
 │   ├── dockerfile      # Base image: Arch Linux + OpenJDK 17
 │   ├── spark/          # Spark 3.5 image with S3 and PostgreSQL connectors

@@ -14,5 +14,4 @@ FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /build/target/fred-ingestion-*.jar app.jar
 
-ENV RAW_DATA_DIR=/data/raw
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

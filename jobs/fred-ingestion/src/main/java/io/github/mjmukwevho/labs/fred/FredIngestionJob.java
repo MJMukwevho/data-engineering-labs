@@ -20,7 +20,10 @@ public class FredIngestionJob {
             return;
         }
 
-        int failures = run(config, new FredClient(config.apiKey()), new RawZoneWriter(config.rawDataDir()));
+        RawStorage storage = RawStorage.forLocation(config.rawLocation(), config.s3ForcePathStyle());
+        System.out.println("Writing raw data to " + config.rawLocation());
+
+        int failures = run(config, new FredClient(config.fredBaseUrl(), config.apiKey()), new RawZoneWriter(storage));
         System.exit(failures == 0 ? 0 : 1);
     }
 
@@ -32,8 +35,8 @@ public class FredIngestionJob {
         for (String seriesId : config.seriesIds()) {
             try {
                 String body = client.fetchObservations(seriesId, config.observationStart());
-                var path = writer.write(seriesId, body, config.observationStart(), ingestedAt);
-                System.out.println("OK    " + seriesId + " -> " + path);
+                String location = writer.write(seriesId, body, config.observationStart(), ingestedAt);
+                System.out.println("OK    " + seriesId + " -> " + location);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 failed.add(seriesId);
