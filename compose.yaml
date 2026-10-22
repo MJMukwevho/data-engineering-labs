@@ -1,14 +1,121 @@
 # Local environment for data-engineering-labs.
 #
-#   cp .env.example .env      # then add your FRED_API_KEY
-#   docker compose run --rm fred-ingestion
+#   cp .env.example .env                    # then add your FRED_API_KEY
+#   docker compose up -d                    # object store, PostgreSQL, Spark
+#   docker compose run --rm fred-ingestion  # pull FRED data into ./data/raw
 #
-# Output lands in ./data/raw on the host.
+# See the README for ports, logins and the Spark smoke test.
+
+x-s3-credentials: &s3-credentials
+  # Standard AWS variable names, so the same code works against real S3 later
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-labadmin}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-labadmin-secret}
+  AWS_DEFAULT_REGION: us-east-1
+
+x-spark-common: &spark-common
+  build: ./infrastructure/spark
+  image: data-eng-labs/spark:3.5.9
+  environment:
+    <<: *s3-credentials
+    LAKE_BUCKET: ${LAKE_BUCKET:-lake}
+    POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+    POSTGRES_USER: ${POSTGRES_USER:-lab}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab}
+  volumes:
+    - ./jobs/spark:/opt/spark-jobs:ro,z
+    - ./data:/data:z
 
 services:
+  # --- Storage -------------------------------------------------------------
+
+  # S3-compatible object store (local stand-in for Amazon S3).
+  # RustFS replaces MinIO, whose free Docker images are no longer published.
+  object-store:
+    image: rustfs/rustfs:1.0.3
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-labadmin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-labadmin-secret}
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+    ports:
+      - "${S3_API_PORT:-9000}:9000"     # S3 API
+      - "${S3_CONSOLE_PORT:-9001}:9001" # web console
+    volumes:
+      - object-store-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -so /dev/null http://localhost:9000/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-off job that creates the data lake bucket, then exits
+  create-bucket:
+    image: amazon/aws-cli:2.31.0
+    depends_on:
+      object-store:
+        condition: service_healthy
+    environment:
+      <<: *s3-credentials
+      LAKE_BUCKET: ${LAKE_BUCKET:-lake}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        aws --endpoint-url http://object-store:9000 s3api head-bucket --bucket "$$LAKE_BUCKET" 2>/dev/null
+        && echo "Bucket $$LAKE_BUCKET already exists"
+        || aws --endpoint-url http://object-store:9000 s3 mb "s3://$$LAKE_BUCKET"
+    restart: "no"
+
+  # Relational warehouse (local stand-in for Amazon RDS / Redshift)
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+      POSTGRES_USER: ${POSTGRES_USER:-lab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --- Processing ----------------------------------------------------------
+
+  # Spark standalone cluster (local stand-in for AWS Glue / EMR Serverless)
+  spark-master:
+    <<: *spark-common
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    ports:
+      - "${SPARK_MASTER_UI_PORT:-8080}:8080" # cluster UI
+      - "${SPARK_APP_UI_PORT:-4040}:4040"    # UI of the running job
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  spark-worker:
+    <<: *spark-common
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      <<: *s3-credentials
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-2g}
+    ports:
+      - "${SPARK_WORKER_UI_PORT:-8081}:8081"
+    depends_on:
+      - spark-master
+
+  # --- Jobs (run on demand, not started by `docker compose up`) -------------
+
   fred-ingestion:
     build: ./jobs/fred-ingestion
     image: data-eng-labs/fred-ingestion:latest
+    profiles: ["jobs"]
     # Write files as your own user, not root, so you can edit or delete them on the host
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
@@ -19,3 +126,7 @@ services:
     volumes:
       # :z relabels the folder for SELinux (needed on Fedora, harmless elsewhere)
       - ./data/raw:/data/raw:z
+
+volumes:
+  object-store-data:
+  postgres-data:
