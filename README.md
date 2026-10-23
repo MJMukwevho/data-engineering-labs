@@ -95,8 +95,8 @@ Each local component has an AWS equivalent, so the same design can be moved to t
 - [x] Docker Compose setup for the ingestion job (`compose.yaml`)
 - [x] Compose stack: Spark 3.5 cluster, PostgreSQL, S3-compatible object store (RustFS)
 - [x] Write raw data to the object store (`s3://lake/raw/`)
-- [ ] Spark transformations: raw → silver → gold
-- [ ] Data quality checks and tests
+- [x] Spark transformations: raw → silver → gold (`jobs/spark/`)
+- [x] Data quality checks and unit tests for the transformations
 - [ ] Orchestration with Airflow
 - [ ] Streaming ingestion with Kafka / Redpanda
 
@@ -198,6 +198,38 @@ The job uses the AWS SDK with the standard AWS environment variables. Pointing i
 
 > **Reading raw data with Spark:** use `.option("pathGlobFilter", "observations.json")` so Spark skips the `_metadata.json` files.
 
+### Transform: raw → silver → gold
+
+Two Spark jobs turn the raw FRED responses into clean, analysis-ready tables:
+
+```bash
+docker compose exec spark-master spark-submit /opt/spark-jobs/fred_silver.py
+docker compose exec spark-master spark-submit /opt/spark-jobs/fred_gold.py
+```
+
+| Layer  | Location | Contents |
+|--------|----------|----------|
+| Silver | `s3://lake/silver/fred_observations/` (Parquet, by `series_id`) | One row per series and date: typed date and `decimal(18,4)` value; FRED's `"."` (no data, e.g. a holiday) becomes NULL; when loads overlap, the most recent load wins |
+| Gold   | `gold.equity_index_performance` (PostgreSQL) and `s3://lake/gold/equity_index_performance/` | S&P 500, Dow and NASDAQ: value, daily return, and 21-trading-day annualised volatility |
+| Gold   | `gold.market_daily` (PostgreSQL) and `s3://lake/gold/market_daily/` | One row per date, one column per series (`sp500`, `vixcls`, `dgs10`, …) |
+
+Both jobs rebuild their output from the layer below, so re-running is safe. The silver job runs **data quality checks** (no duplicates, no unparseable or future dates, no negative values) and writes nothing if one fails.
+
+Try a query:
+
+```bash
+docker compose exec postgres psql -U lab -d warehouse -c \
+  "select observation_date, value, daily_return, volatility_21d_annualized
+     from gold.equity_index_performance
+    where series_id = 'SP500' order by observation_date desc limit 10"
+```
+
+Run the transformation unit tests (no storage needed):
+
+```bash
+docker compose exec spark-master python3 -m unittest discover -s /opt/spark-jobs/tests -v
+```
+
 ### Run without Docker (optional)
 
 With Java 17+ and [Maven](https://maven.apache.org/) installed:
@@ -227,6 +259,11 @@ data-engineering-labs/
 ├── jobs/
 │   ├── fred-ingestion/ # Java job: FRED API → raw layer (own Dockerfile)
 │   └── spark/          # PySpark jobs, mounted into the Spark containers
+│       ├── transforms.py     # Pure transformation functions (unit-tested)
+│       ├── fred_silver.py    # Raw → silver job, with data quality checks
+│       ├── fred_gold.py      # Silver → gold job (lake + PostgreSQL)
+│       ├── smoke_test.py     # Checks Spark can reach storage and PostgreSQL
+│       └── tests/            # Unit tests for transforms.py
 ├── .gitignore
 └── README.md
 ```
@@ -235,7 +272,6 @@ Planned additions:
 
 | Folder        | Purpose                                         |
 |---------------|-------------------------------------------------|
-| `jobs/spark/` | Spark transformations: raw → silver → gold      |
 | `pipelines/`  | Batch and streaming pipeline definitions        |
 | `data/`       | Small sample datasets (large data stays out of Git) |
 | `docs/`       | ADRs, architecture diagrams and cost notes      |

@@ -6,11 +6,22 @@ FROM apache/spark:3.5.9-scala2.12-java17-python3-ubuntu
 #   PostgreSQL JDBC driver      -> read/write the warehouse
 ARG MAVEN_REPO=https://repo.maven.apache.org/maven2
 USER root
-ADD --chown=spark:spark ${MAVEN_REPO}/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar /opt/spark/jars/
-ADD --chown=spark:spark ${MAVEN_REPO}/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar /opt/spark/jars/
-ADD --chown=spark:spark ${MAVEN_REPO}/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar /opt/spark/jars/
+# Downloaded one at a time with retries, so a busy mirror (HTTP 429) doesn't fail the build
+RUN set -eu; \
+    for jar in \
+        org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar \
+        com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar \
+        org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar; \
+    do \
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
+             -o "/opt/spark/jars/$(basename "$jar")" "${MAVEN_REPO}/${jar}"; \
+    done; \
+    chown spark:spark /opt/spark/jars/hadoop-aws-*.jar /opt/spark/jars/aws-java-sdk-bundle-*.jar /opt/spark/jars/postgresql-*.jar
 
-COPY spark-defaults.conf /opt/spark/conf/spark-defaults.conf
+COPY spark-defaults.conf log4j2.properties /opt/spark/conf/
 USER spark
 
 ENV PATH=/opt/spark/bin:$PATH
+# Lets plain `python3` import PySpark (used by the unit tests); spark-submit doesn't need this
+ENV PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip
+ENV PYTHONDONTWRITEBYTECODE=1
